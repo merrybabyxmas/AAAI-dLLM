@@ -15,9 +15,9 @@
 %%%%%%%%%%
 % PDFINFO for PDFLaTeX. Metadata must be plain ASCII.
 \pdfinfo{
-/Title (Not All Denoising Decisions Deserve Equal Credit)
+/Title (Not All Denoising Decisions Deserve Equal Credit: Blockwise Temporal-Difference Credit for Diffusion Language Model Reinforcement Learning)
 /Author (Anonymous AAAI Submission)
-/Keywords (diffusion language models, reinforcement learning, credit assignment, value function)
+/Keywords (diffusion language models, reinforcement learning, credit assignment, temporal difference)
 }
 %%%%%%%%%%
 
@@ -25,7 +25,7 @@
 % \setcounter{secnumdepth}{0}
 
 \title{Not All Denoising Decisions Deserve Equal Credit:\\
-Block-Level Value Credit Assignment for Diffusion Language Model Reinforcement Learning}
+Blockwise Temporal-Difference Credit for Diffusion Language Model Reinforcement Learning}
 
 \author{Anonymous AAAI Submission}
 
@@ -33,7 +33,7 @@ Block-Level Value Credit Assignment for Diffusion Language Model Reinforcement L
 \maketitle
 
 \begin{abstract}
-Recent discrete diffusion language models (dLLMs) have emerged as a competitive alternative to autoregressive language models (AR LLMs), motivating reinforcement learning (RL) methods for dLLMs. Existing approaches often transfer AR-style RL recipes by assigning a sequence-level scalar reward uniformly across tokens or denoising decisions. We argue that this credit assignment is misaligned with dLLM generation. Unlike AR models, where tokens follow a fixed left-to-right order, a dLLM can produce the same sequence through many denoising trajectories, depending on when and under which partially revealed state each token is revealed. Thus, a good or bad final completion does not imply that all reveal decisions deserve equal responsibility. We propose block-level value credit assignment, which evaluates denoising states at block boundaries and uses changes in estimated state value as block credit. This delta-value assigns larger advantages to blocks that improve the expected outcome rather than broadcasting the final reward uniformly. For LLaDA-style block-wise generation, we train a lightweight value head separately from the backbone and use detached delta-values for policy optimization. Our framework reframes dLLM RL as responsibility decomposition over denoising state transitions.
+Recent discrete diffusion language models (dLLMs) have emerged as a competitive alternative to autoregressive language models (AR LLMs), motivating reinforcement learning (RL) methods for dLLMs. Existing approaches often transfer AR-style RL recipes by assigning a sequence-level scalar reward uniformly across tokens or denoising decisions. We argue that this credit assignment is misaligned with dLLM generation. Unlike AR models, where tokens follow a fixed left-to-right order, a dLLM can produce the same sequence through many denoising trajectories. Thus, a good or bad final completion does not imply that all reveal decisions deserve equal responsibility. We propose Blockwise Temporal-Difference Credit (BTD), which evaluates denoising states at block boundaries and uses temporal-difference residuals of learned state values as block credit. BTD assigns larger advantages to blocks that improve the expected outcome rather than broadcasting the final reward uniformly. For LLaDA-style block-wise generation, we train a lightweight value head separately from the backbone and use detached BTD advantages for policy optimization. Our framework reframes dLLM RL as responsibility decomposition over denoising state transitions.
 \end{abstract}
 
 \section{Introduction}
@@ -42,17 +42,17 @@ Diffusion language models (dLLMs) are rapidly emerging as an alternative to auto
 
 In AR LLMs, the generation trajectory is relatively well defined. The model selects the next token conditioned on the previous prefix, and the resulting action sequence follows a fixed left-to-right order. Therefore, applying a sequence-level or group-level advantage to token log-probabilities is at least consistent with the temporal ordering of the generation process. In contrast, a dLLM can generate the same final output through many different denoising trajectories. A token may be revealed early under highly uncertain context, or late after most of the surrounding sequence has already been determined. These two cases can lead to the same final text but correspond to very different decisions. Nevertheless, existing dLLM RL approaches often treat a successful completion as evidence that all token decisions were good, and an unsuccessful completion as evidence that all token decisions were bad. This is an overly coarse form of reward broadcasting for a non-autoregressive denoising process.
 
-This paper begins with a simple question: Does a good result consist entirely of good actions? Does a bad result consist entirely of bad actions? We argue that the answer is no for dLLMs. The responsibility of a reveal decision should depend on the state in which it was made and on how much it changed the future trajectory. During early or middle denoising, many positions remain masked, and the model must commit to tokens or blocks under incomplete context. These decisions can shape subsequent context and strongly constrain later reveals. During late denoising, many positions have already been filled, and the remaining masked tokens may be heavily constrained by the existing context. Of course, late tokens are not always unimportant. The key point is not whether a decision occurs early or late, but whether it changes the value of the partially revealed state. Credit assignment in dLLMs should therefore be based on the value change induced by denoising state transitions, rather than on token position or final reward alone.
+This paper begins with a simple question: Does a good result consist entirely of good actions? Does a bad result consist entirely of bad actions? We argue that the answer is no for dLLMs. The responsibility of a reveal decision should depend on the state in which it was made and on how much it changed the future trajectory. During early or middle denoising, many positions remain masked, and the model must commit to tokens or blocks under incomplete context. These decisions can shape subsequent context and strongly constrain later reveals. During late denoising, many positions have already been filled, and the remaining masked tokens may be heavily constrained by the existing context. Of course, late tokens are not always unimportant. The key point is not whether a decision occurs early or late, but whether it changes the value of the partially revealed state. Credit assignment in dLLMs should therefore be based on the temporal-difference signal induced by denoising state transitions, rather than on token position or final reward alone.
 
-Motivated by this observation, we propose block-level value credit assignment. Instead of assigning the same reward to every token, we estimate the value of denoising states at block boundaries, matching the block-wise generation structure used by LLaDA-style dLLMs. Specifically, when block $b$ is completed, we represent the state $s_b$ using the hidden representation of the partially revealed sequence. A lightweight value head predicts a scalar value $V(s_b)$ from the backbone hidden states. The credit of a block is then computed from the difference between adjacent state values: if completing block $b$ increases the estimated value of the trajectory, the block receives positive credit; if it decreases or fails to improve the value, it receives smaller or negative credit. The final block is handled using a temporal-difference error between the final reward and the last estimated value. The resulting delta-value is shared by tokens within the block and used as their advantage during policy optimization.
+Motivated by this observation, we propose Blockwise Temporal-Difference Credit (BTD). Instead of assigning the same reward to every token, BTD estimates the value of denoising states at block boundaries, matching the block-wise generation structure used by LLaDA-style dLLMs. Specifically, when block $b$ is completed, we represent the state $s_b$ using the hidden representation of the partially revealed sequence. A lightweight value head predicts a scalar value $V(s_b)$ from the backbone hidden states. The credit of a block is then computed as a TD-style residual between adjacent state values: if completing block $b$ increases the estimated value of the trajectory, the block receives positive credit; if it decreases or fails to improve the value, it receives smaller or negative credit. The final block is handled using the residual between the final reward and the last estimated value. The resulting BTD signal is shared by tokens within the block and used as their advantage during policy optimization.
 
-Our approach emphasizes that the central challenge in dLLM RL is not simply reward maximization, but responsibility decomposition over denoising trajectories. The value function learns from data which blocks substantially improve the expected outcome and which blocks merely complete an already determined trajectory. To make this practical, we use a two-stage training pipeline. First, with the backbone frozen, a small value head is trained to predict the final reward from block-boundary states. Second, detached delta-values are used as fixed advantages in a PPO-style clipped policy objective with a KL penalty. This separation reduces gradient interference between value estimation and policy optimization. Our contributions are threefold. First, we analyze why sequence-level reward broadcasting is insufficient for dLLM RL from the perspective of denoising trajectories and action responsibility. Second, we propose block-level delta-value credit assignment using temporal differences of learned state values. Third, we present a practical two-stage RL pipeline for block-wise dLLM generation.
+Our approach emphasizes that the central challenge in dLLM RL is not simply reward maximization, but responsibility decomposition over denoising trajectories. The value function learns from data which blocks substantially improve the expected outcome and which blocks merely complete an already determined trajectory. To make this practical, we use a two-stage training pipeline. First, with the backbone frozen, a small value head is trained to predict the final reward from block-boundary states. Second, detached BTD advantages are used in a PPO-style clipped policy objective with a KL penalty. This separation reduces gradient interference between value estimation and policy optimization. Our contributions are threefold. First, we analyze why sequence-level reward broadcasting is insufficient for dLLM RL from the perspective of denoising trajectories and action responsibility. Second, we propose BTD, a blockwise temporal-difference credit assignment method based on learned state values. Third, we present a practical two-stage RL pipeline for block-wise dLLM generation.
 
 \section{Related Work}
 
 Diffusion language models generate text by repeatedly denoising masked or corrupted token sequences rather than by strictly autoregressive next-token prediction. Early work on D3PMs formulated denoising diffusion in discrete state spaces \cite{austin2021structured}, while Diffusion-LM and DiffuSeq explored diffusion-based text generation in continuous and sequence-to-sequence settings \cite{li2022diffusionlm,gong2022diffuseq}. Subsequent work improved diffusion language modeling through semi-autoregressive simplex representations, score-entropy objectives, and simplified masked diffusion objectives \cite{han2022ssdlm,lou2023sedd,sahoo2024mdlm}. More recently, large-scale dLLMs such as LLaDA and Dream have shown that diffusion-based language models can support instruction following, reasoning, and coding abilities at a scale comparable to AR LLMs \cite{nie2025llada,ye2025dream}. Block Diffusion further studies the interpolation between autoregressive and diffusion language modeling by generating text in blocks \cite{arriola2025block}. Recent inference methods such as DAWN also show that reveal decisions in dLLMs are not independent and that choosing reliable unmasking positions is important for both efficiency and generation quality \cite{luo2026dawn}. These works primarily focus on model architecture, training objectives, scaling, sampling efficiency, inference scheduling, or generation quality. In contrast, our work focuses on RL fine-tuning and asks how a final reward should be decomposed across the denoising state transitions that produced a completion.
 
-Reinforcement learning for language models commonly applies sequence-level rewards to token-level policy gradients. RLHF and PPO-style methods optimize AR LLMs using rewards assigned to complete responses, while DPO and GRPO-style methods further simplify or stabilize preference and group-relative optimization. Recent work extends this idea to diffusion models and dLLMs. DDPO formulates diffusion denoising as a multi-step decision-making process and optimizes diffusion models with policy gradients \cite{black2023ddpo}; d1 adapts masked dLLMs into reasoning models through supervised fine-tuning and a critic-free diffu-GRPO objective \cite{zhao2025d1}. However, such approaches do not fully account for the fact that different denoising steps or reveal decisions may carry different responsibility for the final outcome. In diffusion models, different denoising steps can affect final sample quality to different degrees; in dLLMs, the completeness of the surrounding context and the uncertainty of the current state can substantially change the responsibility of a reveal decision. Our method differs from sequence-level reward broadcasting by estimating values at block-boundary states and assigning credit according to changes in those values. This can be viewed as adapting the classical temporal-difference perspective of RL to dLLM denoising trajectories. By training a value head separately from the backbone policy and using detached delta-values for policy updates, we reduce gradient interference and make value-based credit assignment practical for block-wise dLLM RL.
+Reinforcement learning for language models commonly applies sequence-level rewards to token-level policy gradients. RLHF and PPO-style methods optimize AR LLMs using rewards assigned to complete responses, while DPO and GRPO-style methods further simplify or stabilize preference and group-relative optimization. Recent work extends this idea to diffusion models and dLLMs. DDPO formulates diffusion denoising as a multi-step decision-making process and optimizes diffusion models with policy gradients \cite{black2023ddpo}; d1 adapts masked dLLMs into reasoning models through supervised fine-tuning and a critic-free diffu-GRPO objective \cite{zhao2025d1}. However, such approaches do not fully account for the fact that different denoising steps or reveal decisions may carry different responsibility for the final outcome. In diffusion models, different denoising steps can affect final sample quality to different degrees; in dLLMs, the completeness of the surrounding context and the uncertainty of the current state can substantially change the responsibility of a reveal decision. Our method differs from sequence-level reward broadcasting by estimating values at block-boundary states and assigning credit according to TD-style residuals of those values. This can be viewed as adapting the classical temporal-difference perspective of RL to dLLM denoising trajectories. By training a value head separately from the backbone policy and using detached BTD advantages for policy updates, we reduce gradient interference and make temporal-difference credit assignment practical for block-wise dLLM RL.
 
 \section{Method}
 \label{sec:method}
@@ -61,7 +61,7 @@ Reinforcement learning for language models commonly applies sequence-level rewar
 
 Given a prompt $x_p$, a diffusion language model samples a group of $G$ completions $\{x_c^g\}_{g=1}^{G}$ through iterative denoising. Each completion receives a scalar reward $r^g$, and the goal of RL fine-tuning is to update the policy so as to increase the expected reward of sampled completions. Following group-relative RL methods, we compute a group-normalized return target $\bar{A}^g$ from the rewards in the group. Existing dLLM RL approaches typically broadcast this completion-level quantity to every token in $x_c^g$: every reveal decision in a successful completion receives the same positive signal, and every reveal decision in an unsuccessful completion receives the same negative signal.
 
-We argue that this credit assignment is too coarse for dLLMs. A completion is not produced by a fixed left-to-right action sequence, but by a denoising trajectory in which different blocks may be revealed under very different state uncertainty. We therefore assign credit at the block level. Let $R^g$ denote the scalar training target for completion $g$; in our implementation, $R^g=\bar{A}^g$. Our objective is to estimate how much each block transition changes the value of the partially revealed state, and to use this value difference as the advantage for tokens in that block.
+We argue that this credit assignment is too coarse for dLLMs. A completion is not produced by a fixed left-to-right action sequence, but by a denoising trajectory in which different blocks may be revealed under very different state uncertainty. We therefore assign credit at the block level. Let $R^g$ denote the scalar training target for completion $g$; in our implementation, $R^g=\bar{A}^g$. Our objective is to estimate how much each block transition changes the value of the partially revealed state, and to use this temporal-difference residual as the advantage for tokens in that block.
 
 \subsection{Block-Level State Values}
 
@@ -81,7 +81,7 @@ To estimate the expected return of a block-level state, we introduce a lightweig
  \operatorname{Huber}\left(V_\phi(s_b^g), R^g\right).
 \end{equation}
 
-\subsection{Delta-Value Credit Assignment}
+\subsection{Blockwise Temporal-Difference Credit}
 
 Computing $V_\phi(s_b)$ at every block boundary can require many additional forward passes. To reduce memory and computation, we uniformly subsample at most $K$ block boundaries:
 \begin{equation}
@@ -89,7 +89,7 @@ Computing $V_\phi(s_b)$ at every block boundary can require many additional forw
 \end{equation}
 where $b_0=0$ and $b_{K-1}=B-1$ are always included. Each value forward result is immediately moved to CPU memory after computation, reducing peak GPU memory during credit assignment.
 
-For a non-terminal segment between two sampled boundaries, we define the delta-value as the change in value between the two states. For the terminal block, we use the temporal-difference error between the completion-level target and the last state value:
+For a non-terminal segment between two sampled boundaries, BTD defines credit as the temporal-difference residual between the two estimated state values. For the terminal block, it uses the residual between the completion-level target and the last state value:
 \begin{equation}
 \delta_b^g =
 \left\{
@@ -100,15 +100,15 @@ R^g-V_\phi(s_{B-1}^g), & b=B-1.
 \end{array}
 \right.
 \end{equation}
-All blocks in the same sampled segment share the same delta-value. This approximation assigns the same state-transition credit to blocks that lie between two observed value states, while preserving the terminal TD(0) correction. The resulting $\delta_b^g$ measures whether the corresponding block segment improves or worsens the expected outcome of the denoising trajectory.
+All blocks in the same sampled segment share the same BTD signal. This approximation assigns the same state-transition credit to blocks that lie between two observed value states, while preserving the terminal TD(0) correction. The resulting $\delta_b^g$ measures whether the corresponding block segment improves or worsens the expected outcome of the denoising trajectory.
 
 \subsection{Token Advantages and Policy Optimization}
 
-Delta-value is the main credit signal in our method. To convert it into token-level advantages, each token first receives the delta-value of its block. We then apply an optional confidence-based reweighting that accounts for reveal-time uncertainty. Let $c_i^g$ be the softmax probability assigned to token $i$ when it is revealed. We define a responsibility weight $\rho_i^g=(c_i^g+\epsilon)^{-\alpha}$ and normalize it over the completion mask $M^g$, yielding $\tilde{\rho}_i^g$. The final per-token advantage is
+BTD is the main credit signal in our method. To convert it into token-level advantages, each token first receives the BTD signal of its block. We then apply an optional confidence-based reweighting that accounts for reveal-time uncertainty. Let $c_i^g$ be the softmax probability assigned to token $i$ when it is revealed. We define a responsibility weight $\rho_i^g=(c_i^g+\epsilon)^{-\alpha}$ and normalize it over the completion mask $M^g$, yielding $\tilde{\rho}_i^g$. The final per-token advantage is
 \begin{equation}
  A_i^g = \delta_{b(i)}^g \cdot \tilde{\rho}_i^g,
 \end{equation}
-where $b(i)$ denotes the completion block containing token $i$. This reweighting is not the primary source of credit; it only adjusts the block-level signal according to local reveal uncertainty. When the value head is not yet sufficiently trained, delta-values can be nearly constant and uninformative. If the standard deviation of $\delta_b^g$ within a completion is smaller than a threshold $\delta_{\mathrm{gate}}$, we fall back to a confidence-weighted group-level advantage, $A_i^g=R^g\tilde{\rho}_i^g$.
+where $b(i)$ denotes the completion block containing token $i$. Confidence reweighting is not the primary source of credit; it only adjusts the block-level BTD signal according to local reveal uncertainty. When the value head is not yet sufficiently trained, TD residuals can be nearly constant and uninformative. If the standard deviation of $\delta_b^g$ within a completion is smaller than a threshold $\delta_{\mathrm{gate}}$, we fall back to a confidence-weighted group-level advantage, $A_i^g=R^g\tilde{\rho}_i^g$.
 
 Given the per-token advantages, we update the dLLM policy using a PPO-style clipped objective. Let $\ell_{\theta,i}^g$ and $\ell_{\theta_{\mathrm{old}},i}^g$ denote the log-probabilities assigned by the current and old policies to the revealed token at position $i$ under the corresponding denoising state, and let $q_i^g=\exp(\ell_{\theta,i}^g-\ell_{\theta_{\mathrm{old}},i}^g)$. For the completion mask $M^g$, excluding positions after EOS, the policy loss is
 \begin{equation}
@@ -125,7 +125,7 @@ The advantage $A_i^g$ is treated as a constant during policy optimization; no gr
 
 \subsection{Training Procedure}
 
-Each training step consists of five stages. First, the current policy generates $G$ completions and records the reveal-time confidence for each generated token. Second, a reward function scores each completion and produces $r^g$, from which we compute the group-normalized target $R^g=\bar{A}^g$. Third, the credit assignment module computes $V_\phi(s_b)$ for at most $K$ sampled block-boundary states, stages value outputs on CPU, and converts delta-values into per-token advantages. Fourth, the value head is updated with the backbone frozen and hidden states detached. Finally, the policy is updated with the PPO-style clipped objective using the detached per-token advantages.
+Each training step consists of five stages. First, the current policy generates $G$ completions and records the reveal-time confidence for each generated token. Second, a reward function scores each completion and produces $r^g$, from which we compute the group-normalized target $R^g=\bar{A}^g$. Third, the BTD module computes $V_\phi(s_b)$ for at most $K$ sampled block-boundary states, stages value outputs on CPU, and converts TD residuals into per-token advantages. Fourth, the value head is updated with the backbone frozen and hidden states detached. Finally, the policy is updated with the PPO-style clipped objective using the detached per-token advantages.
 
 \begin{table}[t]
 \centering
@@ -139,12 +139,12 @@ Number of blocks $B$ & 8 \\
 Max value states $K$ & 4 \\
 Value hidden size & 256 \\
 Critic learning rate & $5\times10^{-6}$ \\
-Delta-value gate $\delta_{\mathrm{gate}}$ & 0.01 \\
-Credit exponent $\alpha$ & 1.0 \\
+BTD fallback gate $\delta_{\mathrm{gate}}$ & 0.01 \\
+Confidence exponent $\alpha$ & 1.0 \\
 KL coefficient $\beta$ & 0.04 \\
 \hline
 \end{tabular}
-\caption{Default hyperparameters for block-level value credit assignment.}
+\caption{Default hyperparameters for Blockwise Temporal-Difference Credit.}
 \label{tab:method_hparams}
 \end{table}
 
@@ -153,7 +153,7 @@ KL coefficient $\beta$ & 0.04 \\
 
 \subsection{Experimental Setup}
 
-We evaluate whether block-level value credit assignment improves RL fine-tuning of dLLMs over sequence-level reward broadcasting. Unless otherwise stated, we use a LLaDA-style masked diffusion language model as the backbone and fine-tune it with the same rollout budget, decoding length, and KL regularization across all methods. The main evaluation suite covers mathematical reasoning and structured generation: Countdown, GSM8K, MATH-500, and MBPP. Countdown tests target-conditioned arithmetic reasoning, GSM8K and MATH-500 evaluate natural-language mathematical reasoning, and MBPP evaluates code generation under unit-test rewards. For each task, the trajectory bank is not used; all methods are trained only with sampled rollouts and task rewards.
+We evaluate whether BTD improves RL fine-tuning of dLLMs over sequence-level reward broadcasting. Unless otherwise stated, we use a LLaDA-style masked diffusion language model as the backbone and fine-tune it with the same rollout budget, decoding length, and KL regularization across all methods. The main evaluation suite covers mathematical reasoning and structured generation: Countdown, GSM8K, MATH-500, and MBPP. Countdown tests target-conditioned arithmetic reasoning, GSM8K and MATH-500 evaluate natural-language mathematical reasoning, and MBPP evaluates code generation under unit-test rewards. For each task, the trajectory bank is not used; all methods are trained only with sampled rollouts and task rewards.
 
 For reward computation, we use exact-match correctness for Countdown, GSM8K, and MATH-500 after answer extraction, and unit-test pass rate for MBPP. During training, each prompt produces a group of $G$ sampled completions, and rewards are normalized within the group to obtain $R^g=\bar{A}^g$. We report task accuracy or pass@1 on held-out evaluation prompts. All methods use the same prompt format, maximum completion length, block length, number of denoising steps, and random seeds. The primary comparison is among different credit assignment strategies rather than different base models or decoding algorithms.
 
@@ -164,11 +164,11 @@ For reward computation, we use exact-match correctness for Countdown, GSM8K, and
 \hline
 Method & Credit Signal \\
 \hline
-Base & No RL update \\
-Seq-GRPO & Group reward broadcast to all tokens \\
-Conf-GRPO & Group reward with confidence weighting \\
-Delta-V & Block-level value difference \\
-Delta-V+Conf & Delta-V with confidence reweighting \\
+Base LLaDA & No RL update \\
+DiffuGRPO & Group reward broadcast to all tokens \\
+DiffuGRPO+Conf. & Group reward with confidence weighting \\
+BTD w/o Conf. & Blockwise temporal-difference credit \\
+BTD & BTD with confidence reweighting \\
 \hline
 \end{tabular}
 \caption{Placeholder baseline definitions. All methods share the same backbone, rollout budget, and reward function.}
@@ -177,9 +177,9 @@ Delta-V+Conf & Delta-V with confidence reweighting \\
 
 \subsection{Main Results}
 
-Table \ref{tab:main_results} will report the main comparison across four tasks. The expected outcome is that sequence-level reward broadcasting improves over the base model in some settings but remains unstable because it assigns identical credit to all reveal decisions. In contrast, Delta-V credit should provide a more targeted learning signal by emphasizing block transitions that improve the value of the partially revealed state. We will highlight both per-task results and the average score across tasks.
+Table \ref{tab:main_results} will report the main comparison across four tasks. The expected outcome is that DiffuGRPO improves over the base model in some settings but remains unstable because it assigns identical credit to all reveal decisions. In contrast, BTD should provide a more targeted learning signal by emphasizing block transitions that improve the value of the partially revealed state. We will highlight both per-task results and the average score across tasks.
 
-The main result should support three claims. First, block-level credit assignment improves final task performance over sequence-level GRPO-style credit. Second, confidence weighting alone is insufficient to explain the improvement, because Conf-GRPO still lacks state-transition credit. Third, Delta-V+Conf should be the strongest variant when reveal-time uncertainty provides useful additional information, while Delta-V alone should remain competitive and demonstrate that the core improvement comes from value-based block credit.
+The main result should support three claims. First, BTD improves final task performance over DiffuGRPO-style sequence-level credit. Second, confidence weighting alone is insufficient to explain the improvement, because DiffuGRPO+Conf. still lacks state-transition credit. Third, BTD should be the strongest variant when reveal-time uncertainty provides useful additional information, while BTD w/o Conf. should remain competitive and demonstrate that the core improvement comes from temporal-difference block credit.
 
 \begin{table*}[t]
 \centering
@@ -188,11 +188,11 @@ The main result should support three claims. First, block-level credit assignmen
 \hline
 Method & Countdown & GSM8K & MATH-500 & MBPP & Avg. \\
 \hline
-Base & TBD & TBD & TBD & TBD & TBD \\
-Seq-GRPO & TBD & TBD & TBD & TBD & TBD \\
-Conf-GRPO & TBD & TBD & TBD & TBD & TBD \\
-Delta-V & TBD & TBD & TBD & TBD & TBD \\
-Delta-V+Conf & TBD & TBD & TBD & TBD & TBD \\
+Base LLaDA & TBD & TBD & TBD & TBD & TBD \\
+DiffuGRPO & TBD & TBD & TBD & TBD & TBD \\
+DiffuGRPO+Conf. & TBD & TBD & TBD & TBD & TBD \\
+BTD w/o Conf. & TBD & TBD & TBD & TBD & TBD \\
+BTD & TBD & TBD & TBD & TBD & TBD \\
 \hline
 \end{tabular}
 \caption{Placeholder main results. Countdown, GSM8K, and MATH-500 use exact-match accuracy; MBPP uses pass@1.}
@@ -201,9 +201,9 @@ Delta-V+Conf & TBD & TBD & TBD & TBD & TBD \\
 
 \subsection{Ablation Study}
 
-We next isolate which component of the method contributes to the final improvement. The ablation compares sequence-level credit, confidence-only reweighting, Delta-V without confidence reweighting, Delta-V with confidence reweighting, and variants that remove or corrupt key components of the value-based credit signal. In particular, removing terminal TD correction tests whether the final reward is properly propagated to the last block, while shuffled Delta-V tests whether performance depends on meaningful state-value differences rather than arbitrary block-wise noise.
+We next isolate which component of the method contributes to the final improvement. The ablation compares DiffuGRPO, confidence-only reweighting, BTD without confidence reweighting, full BTD, and variants that remove or corrupt key components of the value-based temporal-difference signal. In particular, removing terminal TD correction tests whether the final reward is properly propagated to the last block, while shuffled BTD tests whether performance depends on meaningful state-value residuals rather than arbitrary block-wise noise.
 
-This ablation is designed to separate the proposed credit assignment mechanism from secondary implementation choices. If the method works as intended, Delta-V should outperform confidence-only variants, shuffled Delta-V should degrade performance, and the full Delta-V+Conf variant should provide the best or most stable performance. The number of sampled value states $K$ will also be varied to measure whether a small number of block-boundary evaluations is sufficient.
+This ablation is designed to separate the proposed credit assignment mechanism from secondary implementation choices. If the method works as intended, BTD should outperform confidence-only variants, shuffled BTD should degrade performance, and the full BTD variant should provide the best or most stable performance. The number of sampled value states $K$ will also be varied to measure whether a small number of block-boundary evaluations is sufficient.
 
 \begin{table}[t]
 \centering
@@ -212,25 +212,25 @@ This ablation is designed to separate the proposed credit assignment mechanism f
 \hline
 Variant & GSM8K & MATH-500 & MBPP \\
 \hline
-Seq-GRPO & TBD & TBD & TBD \\
-Conf-GRPO & TBD & TBD & TBD \\
-Delta-V only & TBD & TBD & TBD \\
-Delta-V+Conf & TBD & TBD & TBD \\
-No terminal TD & TBD & TBD & TBD \\
-Shuffled Delta-V & TBD & TBD & TBD \\
-$K=1$ & TBD & TBD & TBD \\
-$K=4$ & TBD & TBD & TBD \\
+DiffuGRPO & TBD & TBD & TBD \\
+DiffuGRPO+Conf. & TBD & TBD & TBD \\
+BTD w/o Conf. & TBD & TBD & TBD \\
+BTD & TBD & TBD & TBD \\
+BTD w/o terminal TD & TBD & TBD & TBD \\
+Shuffled BTD & TBD & TBD & TBD \\
+BTD $K=1$ & TBD & TBD & TBD \\
+BTD $K=4$ & TBD & TBD & TBD \\
 \hline
 \end{tabular}
-\caption{Placeholder ablation results for credit assignment components.}
+\caption{Placeholder ablation results for BTD components.}
 \label{tab:ablation}
 \end{table}
 
 \subsection{Credit Assignment Analysis}
 
-Beyond final accuracy, we analyze where the method assigns credit along denoising trajectories. The first analysis measures the mean and variance of $\delta_b$ by block index. This reveals whether successful trajectories contain concentrated positive credit at decisive block transitions and whether failed trajectories contain negative or unstable value changes. The second analysis compares predicted values $V_\phi(s_b)$ with empirical final rewards to evaluate whether the value head is calibrated enough to provide useful credit signals. The third analysis presents qualitative examples in which sequence-level reward broadcasting assigns identical advantage to all tokens, while Delta-V assigns larger credit to the block that fixes a key reasoning step.
+Beyond final accuracy, we analyze where BTD assigns credit along denoising trajectories. The first analysis measures the mean and variance of $\delta_b$ by block index. This reveals whether successful trajectories contain concentrated positive credit at decisive block transitions and whether failed trajectories contain negative or unstable temporal-difference residuals. The second analysis compares predicted values $V_\phi(s_b)$ with empirical final rewards to evaluate whether the value head is calibrated enough to provide useful credit signals. The third analysis presents qualitative examples in which sequence-level reward broadcasting assigns identical advantage to all tokens, while BTD assigns larger credit to the block that fixes a key reasoning step.
 
-The goal of this analysis is not merely to visualize the learned value head, but to validate the central hypothesis of the paper: denoising decisions do not deserve equal credit. If the method is behaving correctly, high-magnitude Delta-V should appear near blocks that introduce important reasoning operations, target constraints, or code structure, whereas late deterministic completions should receive smaller credit unless they substantially change the final outcome.
+The goal of this analysis is not merely to visualize the learned value head, but to validate the central hypothesis of the paper: denoising decisions do not deserve equal credit. If the method is behaving correctly, high-magnitude BTD signals should appear near blocks that introduce important reasoning operations, target constraints, or code structure, whereas late deterministic completions should receive smaller credit unless they substantially change the final outcome.
 
 \begin{table}[t]
 \centering
@@ -241,18 +241,18 @@ Trajectory Type & Early Blocks & Middle Blocks & Late Blocks \\
 \hline
 Correct & TBD & TBD & TBD \\
 Incorrect & TBD & TBD & TBD \\
-Seq-GRPO credit & Uniform & Uniform & Uniform \\
+DiffuGRPO credit & Uniform & Uniform & Uniform \\
 \hline
 \end{tabular}
-\caption{Placeholder credit distribution analysis. Entries will report mean absolute Delta-V or normalized credit mass.}
+\caption{Placeholder credit distribution analysis. Entries will report mean absolute BTD signal or normalized credit mass.}
 \label{tab:credit_distribution}
 \end{table}
 
 \subsection{Efficiency and Stability}
 
-Finally, we measure the computational overhead and stability of value-based credit assignment. Since Delta-V requires evaluating the value head at sampled block boundaries, the main cost is controlled by the number of sampled value states $K$. We therefore compare training time per step, peak GPU memory, and final performance under different values of $K$. We expect moderate values such as $K=4$ to provide a favorable trade-off between credit quality and overhead.
+Finally, we measure the computational overhead and stability of BTD. Since BTD requires evaluating the value head at sampled block boundaries, the main cost is controlled by the number of sampled value states $K$. We therefore compare training time per step, peak GPU memory, and final performance under different values of $K$. We expect moderate values such as $K=4$ to provide a favorable trade-off between credit quality and overhead.
 
-We also track training stability using reward curves, task accuracy curves, KL divergence, policy loss variance, and value loss. A stable method should improve reward without excessive KL growth or value loss divergence. These diagnostics will show whether Delta-V provides not only higher final performance but also smoother and more sample-efficient RL training than sequence-level reward broadcasting.
+We also track training stability using reward curves, task accuracy curves, KL divergence, policy loss variance, and value loss. A stable method should improve reward without excessive KL growth or value loss divergence. These diagnostics will show whether BTD provides not only higher final performance but also smoother and more sample-efficient RL training than sequence-level reward broadcasting.
 
 \begin{table}[t]
 \centering
@@ -261,10 +261,10 @@ We also track training stability using reward curves, task accuracy curves, KL d
 \hline
 Method & Time/Step & Peak Mem. & Extra States & Score \\
 \hline
-Seq-GRPO & TBD & TBD & 0 & TBD \\
-Delta-V $K=2$ & TBD & TBD & 2 & TBD \\
-Delta-V $K=4$ & TBD & TBD & 4 & TBD \\
-Delta-V $K=8$ & TBD & TBD & 8 & TBD \\
+DiffuGRPO & TBD & TBD & 0 & TBD \\
+BTD $K=2$ & TBD & TBD & 2 & TBD \\
+BTD $K=4$ & TBD & TBD & 4 & TBD \\
+BTD $K=8$ & TBD & TBD & 8 & TBD \\
 \hline
 \end{tabular}
 \caption{Placeholder efficiency and stability comparison.}
