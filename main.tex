@@ -1,0 +1,72 @@
+\documentclass[letterpaper]{article}
+
+% AAAI style. The repository should contain the official AAAI style file from the
+% conference template, e.g., aaai2027.sty or aaai2026.sty.
+\IfFileExists{aaai2027.sty}{\usepackage{aaai2027}}{%
+\IfFileExists{aaai2026.sty}{\usepackage{aaai2026}}{%
+\usepackage{aaai}}}
+
+% Standard AAAI template packages.
+\usepackage{times}
+\usepackage{helvet}
+\usepackage{courier}
+\usepackage[hyphens]{url}
+\usepackage{graphicx}
+\urlstyle{rm}
+\def\UrlFont{\rm}
+\usepackage{natbib}
+\usepackage{caption}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\frenchspacing
+\setlength{\pdfpagewidth}{8.5in}
+\setlength{\pdfpageheight}{11in}
+
+% Keep the official AAAI section-numbering convention.
+\setcounter{secnumdepth}{0}
+
+\title{Not All Denoising Decisions Deserve Equal Credit:\\
+Block-Level Value Credit Assignment for Diffusion Language Model Reinforcement Learning}
+
+\author{Anonymous AAAI Submission}
+\affiliations{Anonymous Affiliation}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Recent discrete diffusion language models (dLLMs) have emerged as a competitive alternative to autoregressive language models (AR LLMs), motivating attempts to improve them with reinforcement learning (RL). Existing approaches often transfer successful AR-style RL recipes to dLLMs by assigning a sequence-level scalar reward uniformly across tokens or denoising decisions. We argue that this uniform credit assignment is fundamentally misaligned with the generation process of dLLMs. Unlike AR models, where tokens are generated in a fixed left-to-right order, a dLLM can produce the same final sequence through many different denoising trajectories, depending on when and under which partially revealed state each token is revealed. As a result, a good or bad final completion does not imply that all reveal decisions deserve equal responsibility. Some blocks may create decisive state transitions that strongly affect the future trajectory, whereas others may merely complete a context that has already been determined. We propose block-level value credit assignment, which evaluates the denoising state at block boundaries and uses the change in estimated state value as the credit for each block. This delta-value credit assigns larger advantages to blocks that improve the expected outcome of the trajectory, rather than broadcasting the final reward uniformly. Using the block-wise generation structure of LLaDA-style dLLMs, we train a lightweight value head separately from the backbone and use detached delta-values as advantages for policy optimization. Our framework reframes dLLM RL as a problem of evaluating and decomposing responsibility across denoising state transitions, rather than merely optimizing sequence-level rewards.
+\end{abstract}
+
+\section{Introduction}
+
+Diffusion language models (dLLMs) are rapidly emerging as an alternative to autoregressive language models (AR LLMs). While AR LLMs generate tokens sequentially from left to right, dLLMs iteratively denoise a masked sequence and reveal tokens at multiple positions in a non-autoregressive or semi-autoregressive manner. This generation process enables parallel decoding and flexible infilling, and recent large-scale dLLMs such as LLaDA and Dream have shown competitive performance on instruction following, mathematical reasoning, and code generation benchmarks \citep{nie2025llada,ye2025dream}. A natural next question is whether dLLMs can also benefit from reinforcement learning (RL), as AR LLMs have. Recent work has begun to adapt policy-gradient or GRPO-style objectives to diffusion models and dLLMs \citep{black2023ddpo,zhao2025d1}. However, we argue that directly transferring AR-style RL to dLLMs introduces a fundamental credit assignment problem.
+
+In AR LLMs, the generation trajectory is relatively well defined. The model selects the next token conditioned on the previous prefix, and the resulting action sequence follows a fixed left-to-right order. Therefore, applying a sequence-level or group-level advantage to token log-probabilities is at least consistent with the temporal ordering of the generation process. In contrast, a dLLM can generate the same final output through many different denoising trajectories. A token may be revealed early under highly uncertain context, or late after most of the surrounding sequence has already been determined. These two cases can lead to the same final text but correspond to very different decisions. Nevertheless, existing dLLM RL approaches often treat a successful completion as evidence that all token decisions were good, and an unsuccessful completion as evidence that all token decisions were bad. This is an overly coarse form of reward broadcasting for a non-autoregressive denoising process.
+
+This paper begins with a simple question: Does a good result consist entirely of good actions? Does a bad result consist entirely of bad actions? We argue that the answer is no for dLLMs. The responsibility of a reveal decision should depend on the state in which it was made and on how much it changed the future trajectory. During early or middle denoising, many positions remain masked, and the model must commit to tokens or blocks under incomplete context. These decisions can shape subsequent context and strongly constrain later reveals. During late denoising, many positions have already been filled, and the remaining masked tokens may be heavily constrained by the existing context. Of course, late tokens are not always unimportant. The key point is not whether a decision occurs early or late, but whether it changes the value of the partially revealed state. Credit assignment in dLLMs should therefore be based on the value change induced by denoising state transitions, rather than on token position or final reward alone.
+
+Motivated by this observation, we propose block-level value credit assignment. Instead of assigning the same reward to every token, we estimate the value of denoising states at block boundaries, matching the block-wise generation structure used by LLaDA-style dLLMs. Specifically, when block $b$ is completed, we represent the state $s_b$ using the hidden representation of the partially revealed sequence. A lightweight value head predicts a scalar value $V(s_b)$ from the backbone hidden states. The credit of a block is then computed from the difference between adjacent state values: if completing block $b$ increases the estimated value of the trajectory, the block receives positive credit; if it decreases or fails to improve the value, it receives smaller or negative credit. The final block is handled using a temporal-difference error between the final reward and the last estimated value. The resulting delta-value is shared by tokens within the block and used as their advantage during policy optimization.
+
+Our approach emphasizes that the central challenge in dLLM RL is not simply reward maximization, but responsibility decomposition over denoising trajectories. The value function learns from data which blocks substantially improve the expected outcome and which blocks merely complete an already determined trajectory. To make this practical, we use a two-stage training pipeline. First, with the backbone frozen, a small value head is trained to predict the final reward from block-boundary states. Second, detached delta-values are used as fixed advantages in a PPO-style clipped policy objective with a KL penalty. This separation reduces gradient interference between value estimation and policy optimization. Our contributions are threefold. First, we analyze why sequence-level reward broadcasting is insufficient for dLLM RL from the perspective of denoising trajectories and action responsibility. Second, we propose block-level delta-value credit assignment using temporal differences of learned state values. Third, we present a practical two-stage RL pipeline for block-wise dLLM generation.
+
+\section{Related Work}
+
+Diffusion language models generate text by repeatedly denoising masked or corrupted token sequences rather than by strictly autoregressive next-token prediction. Early work on D3PMs formulated denoising diffusion in discrete state spaces \citep{austin2021structured}, while Diffusion-LM and DiffuSeq explored diffusion-based text generation in continuous and sequence-to-sequence settings \citep{li2022diffusionlm,gong2022diffuseq}. Subsequent work improved diffusion language modeling through semi-autoregressive simplex representations, score-entropy objectives, and simplified masked diffusion objectives \citep{han2022ssdlm,lou2023sedd,sahoo2024mdlm}. More recently, large-scale dLLMs such as LLaDA and Dream have shown that diffusion-based language models can support instruction following, reasoning, and coding abilities at a scale comparable to AR LLMs \citep{nie2025llada,ye2025dream}. Block Diffusion further studies the interpolation between autoregressive and diffusion language modeling by generating text in blocks \citep{arriola2025block}. Recent inference methods such as DAWN also show that reveal decisions in dLLMs are not independent and that choosing reliable unmasking positions is important for both efficiency and generation quality \citep{luo2026dawn}. These works primarily focus on model architecture, training objectives, scaling, sampling efficiency, inference scheduling, or generation quality. In contrast, our work focuses on RL fine-tuning and asks how a final reward should be decomposed across the denoising state transitions that produced a completion.
+
+Reinforcement learning for language models commonly applies sequence-level rewards to token-level policy gradients. RLHF and PPO-style methods optimize AR LLMs using rewards assigned to complete responses, while DPO and GRPO-style methods further simplify or stabilize preference and group-relative optimization. Recent work extends this idea to diffusion models and dLLMs. DDPO formulates diffusion denoising as a multi-step decision-making process and optimizes diffusion models with policy gradients \citep{black2023ddpo}; d1 adapts masked dLLMs into reasoning models through supervised fine-tuning and a critic-free diffu-GRPO objective \citep{zhao2025d1}. However, such approaches do not fully account for the fact that different denoising steps or reveal decisions may carry different responsibility for the final outcome. In diffusion models, different denoising steps can affect final sample quality to different degrees; in dLLMs, the completeness of the surrounding context and the uncertainty of the current state can substantially change the responsibility of a reveal decision. Our method differs from sequence-level reward broadcasting by estimating values at block-boundary states and assigning credit according to changes in those values. This can be viewed as adapting the classical temporal-difference perspective of RL to dLLM denoising trajectories. By training a value head separately from the backbone policy and using detached delta-values for policy updates, we reduce gradient interference and make value-based credit assignment practical for block-wise dLLM RL.
+
+\section{Method}
+\label{sec:method}
+% TODO: Add method details.
+
+\section{Experiments}
+\label{sec:experiments}
+% TODO: Add experimental setup, results, ablations, and analysis.
+
+\section{Conclusion}
+\label{sec:conclusion}
+% TODO: Add conclusion.
+
+\bibliography{references}
+\end{document}
