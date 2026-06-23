@@ -150,7 +150,126 @@ KL coefficient $\beta$ & 0.04 \\
 
 \section{Experiments}
 \label{sec:experiments}
-% TODO: Add experimental setup, results, ablations, and analysis.
+
+\subsection{Experimental Setup}
+
+We evaluate whether block-level value credit assignment improves RL fine-tuning of dLLMs over sequence-level reward broadcasting. Unless otherwise stated, we use a LLaDA-style masked diffusion language model as the backbone and fine-tune it with the same rollout budget, decoding length, and KL regularization across all methods. The main evaluation suite covers mathematical reasoning and structured generation: Countdown, GSM8K, MATH-500, and MBPP. Countdown tests target-conditioned arithmetic reasoning, GSM8K and MATH-500 evaluate natural-language mathematical reasoning, and MBPP evaluates code generation under unit-test rewards. For each task, the trajectory bank is not used; all methods are trained only with sampled rollouts and task rewards.
+
+For reward computation, we use exact-match correctness for Countdown, GSM8K, and MATH-500 after answer extraction, and unit-test pass rate for MBPP. During training, each prompt produces a group of $G$ sampled completions, and rewards are normalized within the group to obtain $R^g=\bar{A}^g$. We report task accuracy or pass@1 on held-out evaluation prompts. All methods use the same prompt format, maximum completion length, block length, number of denoising steps, and random seeds. The primary comparison is among different credit assignment strategies rather than different base models or decoding algorithms.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{ll}
+\hline
+Method & Credit Signal \\
+\hline
+Base & No RL update \\
+Seq-GRPO & Group reward broadcast to all tokens \\
+Conf-GRPO & Group reward with confidence weighting \\
+Delta-V & Block-level value difference \\
+Delta-V+Conf & Delta-V with confidence reweighting \\
+\hline
+\end{tabular}
+\caption{Placeholder baseline definitions. All methods share the same backbone, rollout budget, and reward function.}
+\label{tab:baseline_definitions}
+\end{table}
+
+\subsection{Main Results}
+
+Table \ref{tab:main_results} will report the main comparison across four tasks. The expected outcome is that sequence-level reward broadcasting improves over the base model in some settings but remains unstable because it assigns identical credit to all reveal decisions. In contrast, Delta-V credit should provide a more targeted learning signal by emphasizing block transitions that improve the value of the partially revealed state. We will highlight both per-task results and the average score across tasks.
+
+The main result should support three claims. First, block-level credit assignment improves final task performance over sequence-level GRPO-style credit. Second, confidence weighting alone is insufficient to explain the improvement, because Conf-GRPO still lacks state-transition credit. Third, Delta-V+Conf should be the strongest variant when reveal-time uncertainty provides useful additional information, while Delta-V alone should remain competitive and demonstrate that the core improvement comes from value-based block credit.
+
+\begin{table*}[t]
+\centering
+\small
+\begin{tabular}{lccccc}
+\hline
+Method & Countdown & GSM8K & MATH-500 & MBPP & Avg. \\
+\hline
+Base & TBD & TBD & TBD & TBD & TBD \\
+Seq-GRPO & TBD & TBD & TBD & TBD & TBD \\
+Conf-GRPO & TBD & TBD & TBD & TBD & TBD \\
+Delta-V & TBD & TBD & TBD & TBD & TBD \\
+Delta-V+Conf & TBD & TBD & TBD & TBD & TBD \\
+\hline
+\end{tabular}
+\caption{Placeholder main results. Countdown, GSM8K, and MATH-500 use exact-match accuracy; MBPP uses pass@1.}
+\label{tab:main_results}
+\end{table*}
+
+\subsection{Ablation Study}
+
+We next isolate which component of the method contributes to the final improvement. The ablation compares sequence-level credit, confidence-only reweighting, Delta-V without confidence reweighting, Delta-V with confidence reweighting, and variants that remove or corrupt key components of the value-based credit signal. In particular, removing terminal TD correction tests whether the final reward is properly propagated to the last block, while shuffled Delta-V tests whether performance depends on meaningful state-value differences rather than arbitrary block-wise noise.
+
+This ablation is designed to separate the proposed credit assignment mechanism from secondary implementation choices. If the method works as intended, Delta-V should outperform confidence-only variants, shuffled Delta-V should degrade performance, and the full Delta-V+Conf variant should provide the best or most stable performance. The number of sampled value states $K$ will also be varied to measure whether a small number of block-boundary evaluations is sufficient.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lccc}
+\hline
+Variant & GSM8K & MATH-500 & MBPP \\
+\hline
+Seq-GRPO & TBD & TBD & TBD \\
+Conf-GRPO & TBD & TBD & TBD \\
+Delta-V only & TBD & TBD & TBD \\
+Delta-V+Conf & TBD & TBD & TBD \\
+No terminal TD & TBD & TBD & TBD \\
+Shuffled Delta-V & TBD & TBD & TBD \\
+$K=1$ & TBD & TBD & TBD \\
+$K=4$ & TBD & TBD & TBD \\
+\hline
+\end{tabular}
+\caption{Placeholder ablation results for credit assignment components.}
+\label{tab:ablation}
+\end{table}
+
+\subsection{Credit Assignment Analysis}
+
+Beyond final accuracy, we analyze where the method assigns credit along denoising trajectories. The first analysis measures the mean and variance of $\delta_b$ by block index. This reveals whether successful trajectories contain concentrated positive credit at decisive block transitions and whether failed trajectories contain negative or unstable value changes. The second analysis compares predicted values $V_\phi(s_b)$ with empirical final rewards to evaluate whether the value head is calibrated enough to provide useful credit signals. The third analysis presents qualitative examples in which sequence-level reward broadcasting assigns identical advantage to all tokens, while Delta-V assigns larger credit to the block that fixes a key reasoning step.
+
+The goal of this analysis is not merely to visualize the learned value head, but to validate the central hypothesis of the paper: denoising decisions do not deserve equal credit. If the method is behaving correctly, high-magnitude Delta-V should appear near blocks that introduce important reasoning operations, target constraints, or code structure, whereas late deterministic completions should receive smaller credit unless they substantially change the final outcome.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lccc}
+\hline
+Trajectory Type & Early Blocks & Middle Blocks & Late Blocks \\
+\hline
+Correct & TBD & TBD & TBD \\
+Incorrect & TBD & TBD & TBD \\
+Seq-GRPO credit & Uniform & Uniform & Uniform \\
+\hline
+\end{tabular}
+\caption{Placeholder credit distribution analysis. Entries will report mean absolute Delta-V or normalized credit mass.}
+\label{tab:credit_distribution}
+\end{table}
+
+\subsection{Efficiency and Stability}
+
+Finally, we measure the computational overhead and stability of value-based credit assignment. Since Delta-V requires evaluating the value head at sampled block boundaries, the main cost is controlled by the number of sampled value states $K$. We therefore compare training time per step, peak GPU memory, and final performance under different values of $K$. We expect moderate values such as $K=4$ to provide a favorable trade-off between credit quality and overhead.
+
+We also track training stability using reward curves, task accuracy curves, KL divergence, policy loss variance, and value loss. A stable method should improve reward without excessive KL growth or value loss divergence. These diagnostics will show whether Delta-V provides not only higher final performance but also smoother and more sample-efficient RL training than sequence-level reward broadcasting.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lcccc}
+\hline
+Method & Time/Step & Peak Mem. & Extra States & Score \\
+\hline
+Seq-GRPO & TBD & TBD & 0 & TBD \\
+Delta-V $K=2$ & TBD & TBD & 2 & TBD \\
+Delta-V $K=4$ & TBD & TBD & 4 & TBD \\
+Delta-V $K=8$ & TBD & TBD & 8 & TBD \\
+\hline
+\end{tabular}
+\caption{Placeholder efficiency and stability comparison.}
+\label{tab:efficiency}
+\end{table}
 
 \section{Conclusion}
 \label{sec:conclusion}
