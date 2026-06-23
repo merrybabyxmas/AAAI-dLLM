@@ -56,7 +56,126 @@ Reinforcement learning for language models commonly applies sequence-level rewar
 
 \section{Method}
 \label{sec:method}
-% TODO: Add method details.
+
+\subsection{Problem Formulation}
+
+Given a prompt $x_p$, a diffusion language model samples a group of $G$ completions $\{x_c^g\}_{g=1}^{G}$ through iterative denoising. Each completion receives a scalar reward $r^g$, and the goal of RL fine-tuning is to update the policy so as to increase the expected reward of sampled completions. Following group-relative RL methods, we compute a group-normalized return target $\bar{A}^g$ from the rewards in the group. Existing dLLM RL approaches typically broadcast this completion-level quantity to every token in $x_c^g$. In other words, every reveal decision in a successful completion receives the same positive signal, and every reveal decision in an unsuccessful completion receives the same negative signal.
+
+We argue that this credit assignment is too coarse for dLLMs. A completion is not produced by a fixed left-to-right action sequence, but by a denoising trajectory in which different blocks may be revealed under very different state uncertainty. We therefore assign credit at the block level. Let $R^g$ denote the scalar training target for completion $g$; in our implementation, $R^g=\bar{A}^g$. Our objective is to estimate how much each block transition changes the value of the partially revealed state, and to use this value difference as the advantage for tokens in that block.
+
+\subsection{Block-Level State Representation}
+
+We use the block-wise generation structure of LLaDA-style dLLMs. Let $L_B$ be the block length and $L_c$ be the completion length. The number of completion blocks is $B=\lceil L_c/L_B \rceil$. For block $b$, we define the denoising state after completing blocks up to $b$ as the representation of the prompt concatenated with the revealed completion prefix:
+\begin{equation}
+ s_b^g = \operatorname{MeanPool}\left(
+ h_{-1}\left(x_p \oplus x_c^{g,< (b+1)L_B}\right)
+ \right) \in \mathbb{R}^{H},
+\end{equation}
+where $h_{-1}$ denotes the last-layer hidden states of the backbone model, and mean pooling is performed over the sequence dimension. This state summarizes the model representation when the prompt and the first $b+1$ completion blocks are available. If the last block is shorter than $L_B$, we use the actual available prefix length.
+
+\subsection{Value Head}
+
+To estimate the expected return of a block-level state, we introduce a lightweight value head $V_\phi$. The value head is a two-layer MLP:
+\begin{equation}
+ V_\phi(s_b) = W_2\,\operatorname{GELU}(W_1 s_b + a_1) + a_2 \in \mathbb{R}.
+\end{equation}
+In our implementation, the hidden dimension is $256$, so the mapping is $4096 \rightarrow 256 \rightarrow 1$ for a LLaDA-style backbone. The value head is maintained in fp32 and optimized with AdamW using a separate learning rate of $5\times10^{-6}$.
+
+The value head is trained separately from the backbone policy. During value computation, the backbone is executed under no-gradient mode, and the hidden state is detached before it is passed to $V_\phi$. Thus, the value-head update and the policy update do not share a computation graph. This prevents policy gradients from flowing through the value head into the backbone and keeps value estimation separate from policy optimization. For sampled block-boundary states, we train the value head with a Huber regression loss toward the completion-level target:
+\begin{equation}
+ \mathcal{L}_{V}
+ = \frac{1}{G|\mathcal{B}|}
+ \sum_{g=1}^{G}\sum_{b\in\mathcal{B}}
+ \operatorname{Huber}\left(V_\phi(s_b^g), R^g\right).
+\end{equation}
+
+\subsection{Delta-Value Credit Assignment}
+
+Computing $V_\phi(s_b)$ at every block boundary can require many additional forward passes. To reduce memory and computation, we uniformly subsample at most $K$ block boundaries:
+\begin{equation}
+ \mathcal{B}=\{b_0,b_1,\ldots,b_{K-1}\}\subseteq\{0,1,\ldots,B-1\},
+\end{equation}
+where $b_0=0$ and $b_{K-1}=B-1$ are always included. Each value forward result is immediately moved to CPU memory after computation, reducing peak GPU memory during credit assignment.
+
+For a non-terminal segment between two sampled boundaries, we define the delta-value as the change in value between the two states. For the terminal block, we use the temporal-difference error between the completion-level target and the last state value:
+\begin{equation}
+\delta_b^g =
+\left\{
+\begin{array}{ll}
+V_\phi(s_{b_{i+1}}^g)-V_\phi(s_{b_i}^g), &
+ b\in [b_i,b_{i+1}),\\
+R^g-V_\phi(s_{B-1}^g), & b=B-1.
+\end{array}
+\right.
+\end{equation}
+All blocks in the same sampled segment share the same delta-value. This approximation assigns the same state-transition credit to blocks that lie between two observed value states, while preserving the terminal TD(0) correction. The resulting $\delta_b^g$ measures whether the corresponding block segment improves or worsens the expected outcome of the denoising trajectory.
+
+\subsection{Per-Token Advantage}
+
+We convert block-level credit into token-level advantages by assigning each token the delta-value of its block. To further account for the responsibility of individual reveal decisions, we weight each token by the confidence at the moment it is revealed. Let $c_i^g$ be the softmax probability assigned to token $i$ when it is revealed. We define a confidence-based responsibility weight as
+\begin{equation}
+ \rho_i^g = (c_i^g + \epsilon)^{-\alpha},
+\end{equation}
+where $\alpha$ controls the strength of confidence reweighting. This assigns larger weights to low-confidence reveal decisions, which are more likely to represent uncertain and consequential choices. We normalize the weights over the completion mask $M^g$:
+\begin{equation}
+ \tilde{\rho}_i^g =
+ \frac{\rho_i^g}{\frac{1}{|M^g|}\sum_{j\in M^g}\rho_j^g}.
+\end{equation}
+The final per-token advantage is
+\begin{equation}
+ A_i^g = \delta_{b(i)}^g \cdot \tilde{\rho}_i^g,
+\end{equation}
+where $b(i)$ denotes the completion block containing token $i$.
+
+When the value head is not yet sufficiently trained, delta-values can be nearly constant and uninformative. We therefore use a simple fallback gate. If the standard deviation of $\delta_b^g$ within a completion is smaller than a threshold $\delta_{\mathrm{gate}}$, we replace the delta-value with the group-normalized completion-level target and apply only the confidence weight:
+\begin{equation}
+ A_i^g = R^g \cdot \tilde{\rho}_i^g.
+\end{equation}
+This fallback recovers a confidence-weighted version of group-level credit assignment during early value-head learning.
+
+\subsection{Policy Update}
+
+Given the per-token advantages $A_i^g$, we update the dLLM policy using a PPO-style clipped objective. Let $\ell_{\theta,i}^g$ and $\ell_{\theta_{\mathrm{old}},i}^g$ denote the log-probabilities assigned by the current and old policies to the revealed token at position $i$ under the corresponding denoising state. The likelihood ratio is
+\begin{equation}
+ q_i^g = \exp\left(\ell_{\theta,i}^g-\ell_{\theta_{\mathrm{old}},i}^g\right).
+\end{equation}
+For the completion mask $M^g$, excluding positions after EOS, the policy loss is
+\begin{equation}
+\mathcal{L}_{\pi} =
+-\frac{1}{\sum_g |M^g|}
+\sum_{g=1}^{G}\sum_{i\in M^g}
+\min\left(
+q_i^g A_i^g,
+\operatorname{clip}(q_i^g,1-\epsilon_{\mathrm{clip}},1+\epsilon_{\mathrm{clip}})A_i^g
+\right)
++\beta D_{\mathrm{KL}}.
+\end{equation}
+The advantage $A_i^g$ is treated as a constant during policy optimization; no gradient is propagated through the value computation or the confidence weights.
+
+\subsection{Training Loop Summary}
+
+Each training step consists of five stages. First, the current policy generates $G$ completions and records the reveal-time confidence for each generated token. Second, a reward function scores each completion and produces $r^g$, from which we compute the group-normalized target $R^g=\bar{A}^g$. Third, the credit assignment module computes $V_\phi(s_b)$ for at most $K$ sampled block-boundary states, stages value outputs on CPU, and converts delta-values into per-token advantages. Fourth, the value head is updated with the backbone frozen and hidden states detached. Finally, the policy is updated with the PPO-style clipped objective using the detached per-token advantages.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lc}
+\hline
+Hyperparameter & Value \\
+\hline
+Block length $L_B$ & 32 \\
+Number of blocks $B$ & 8 \\
+Max value states $K$ & 4 \\
+Value hidden size & 256 \\
+Critic learning rate & $5\times10^{-6}$ \\
+Delta-value gate $\delta_{\mathrm{gate}}$ & 0.01 \\
+Credit exponent $\alpha$ & 1.0 \\
+KL coefficient $\beta$ & 0.04 \\
+\hline
+\end{tabular}
+\caption{Default hyperparameters for block-level value credit assignment.}
+\label{tab:method_hparams}
+\end{table}
 
 \section{Experiments}
 \label{sec:experiments}
